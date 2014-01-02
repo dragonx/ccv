@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <time.h>
 
 static void uri_bbf_on_model_string(void* context, char* string);
 static void uri_bbf_on_source_blob(void* context, ebb_buf data);
@@ -54,6 +55,19 @@ typedef struct {
 	ccv_bbf_classifier_cascade_t* cascade;
 	ebb_buf source;
 } bbf_param_parser_t;
+
+static struct timespec time_diff(struct timespec start, struct timespec end)
+{
+	struct timespec temp;
+	if ((end.tv_nsec-start.tv_nsec)<0) {
+		temp.tv_sec = end.tv_sec-start.tv_sec-1;
+		temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
+	} else {
+		temp.tv_sec = end.tv_sec-start.tv_sec;
+		temp.tv_nsec = end.tv_nsec-start.tv_nsec;
+	}
+	return temp;
+}
 
 static void uri_bbf_param_parser_init(bbf_param_parser_t* parser)
 {
@@ -150,6 +164,8 @@ int uri_bbf_detect_objects(const void* context, const void* parsed, ebb_buf* buf
 		free(parser);
 		return -1;
 	}
+	struct timespec start_time, end_time, diff_time;
+	int c = clock_gettime(CLOCK_MONOTONIC, &(start_time));
 	ccv_dense_matrix_t* image = 0;
 	ccv_read(parser->source.data, &image, CCV_IO_ANY_STREAM | CCV_IO_GRAY, parser->source.written);
 	free(parser->source.data);
@@ -165,13 +181,17 @@ int uri_bbf_detect_objects(const void* context, const void* parsed, ebb_buf* buf
 		free(parser);
 		return -1;
 	}
+	c = clock_gettime(CLOCK_MONOTONIC, &(end_time));
+	diff_time = time_diff(start_time, end_time);
+	long long lldiff = (long long)diff_time.tv_sec * 1000000000LL + diff_time.tv_nsec;
+	char* data;
 	if (seq->rnum > 0)
 	{
 		int i;
-		buf->len = 192 + seq->rnum * 21 + 2;
-		char* data = (char*)malloc(buf->len);
-		data[0] = '[';
-		buf->written = 1;
+		buf->len = 192 + seq->rnum * 21 + 4 + 57; // +4 for {[]}, +30 for count/time/faces+punctuation
+		data = (char*)malloc(buf->len);
+		sprintf(data, "{\"count\":%i,\"time\":%lli,\"faces\":[", seq->rnum, lldiff);
+		buf->written = strnlen(data, 64);
 		for (i = 0; i < seq->rnum; i++)
 		{
 			char cell[128];
@@ -187,26 +207,29 @@ int uri_bbf_detect_objects(const void* context, const void* parsed, ebb_buf* buf
 			buf->written += len + 1;
 			data[buf->written - 1] = (i == seq->rnum - 1) ? ']' : ',';
 		}
-		char http_header[192];
-		snprintf(http_header, 192, ebb_http_header, buf->written);
-		size_t len = strnlen(http_header, 192);
-		if (buf->written + len + 1 >= buf->len)
-		{
-			buf->len = buf->written + len + 1;
-			data = (char*)realloc(data, buf->len);
-		}
-		memmove(data + len, data, buf->written);
-		memcpy(data, http_header, len);
-		buf->written += len + 1;
-		data[buf->written - 1] = '\n';
-		buf->data = data;
-		buf->len = buf->written;
-		buf->on_release = uri_ebb_buf_free;
+		buf->written += 1;
+		data[buf->written - 1] = '}';
 	} else {
-		buf->data = (void*)ebb_http_empty_array;
-		buf->len = sizeof(ebb_http_empty_array);
-		buf->on_release = 0;
+		buf->len = 192 + seq->rnum * 21 + 4 + 57; // +4 for {[]}, +30 for count/time/faces+punctuation
+		data = (char*)malloc(buf->len);
+		sprintf(data, "{\"count\":0,\"time\":%lli,\"faces\":[]}", lldiff);
+		buf->written = strnlen(data, 64);
 	}
+	char http_header[192];
+	snprintf(http_header, 192, ebb_http_header, buf->written);
+	size_t len = strnlen(http_header, 192);
+	if (buf->written + len + 1 >= buf->len)
+	{
+		buf->len = buf->written + len + 1;
+		data = (char*)realloc(data, buf->len);
+	}
+	memmove(data + len, data, buf->written);
+	memcpy(data, http_header, len);
+	buf->written += len + 1;
+	data[buf->written - 1] = '\n';
+	buf->data = data;
+	buf->len = buf->written;
+	buf->on_release = uri_ebb_buf_free;
 	ccv_array_free(seq);
 	free(parser);
 	return 0;
